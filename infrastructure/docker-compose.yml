@@ -1,0 +1,184 @@
+version: '3.9'
+
+services:
+  rabbit:
+    image: rabbitmq
+    container_name: rabbit
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: password
+    networks:
+      - internxt
+
+  bridge-redis:
+    image: redis:latest
+    container_name: bridge-redis
+    restart: always
+    networks:
+      - internxt
+
+  mongo:
+    image: mongo:5
+    container_name: mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: __inxt-network
+    networks:
+      - internxt
+    volumes:
+      - ../../bridge/infrastructure/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    ports:
+      - 27017:27017
+
+  bridge:
+    build:
+      context: ../../bridge
+      dockerfile: infrastructure/development.Dockerfile
+    container_name: bridge
+    networks:
+      - internxt
+    volumes:
+      - ../../bridge:/app
+      - /app/node_modules/
+    depends_on:
+      - mongo
+      - rabbit
+      - bridge-redis
+    ports:
+      - 6382:6382
+
+  mongo-viewer:
+    image: mongo-express
+    container_name: mongo-viewer
+    restart: always
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://admin:password@mongo:27017/__inxt-network
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: password
+    ports:
+      - 8081:8081
+    networks:
+      - internxt
+    depends_on:
+      - mongo
+
+  farmer:
+    build:
+      context: ../../farmer
+      dockerfile: infrastructure/Dockerfile
+    depends_on:
+      - s3
+    container_name: farmer
+    networks:
+      - internxt
+    ports:
+      - 43758:43758
+    volumes:
+      - ../../farmer:/farmer
+      # - /farmer/node_modules/
+
+  s3:
+    image: quay.io/minio/minio
+    container_name: s3
+    restart: always
+    command: server --console-address ":9001" /data
+    ports:
+      - 9000:9000
+      - 9001:9001
+    networks:
+      - internxt
+
+  initialize_s3:
+    image: minio/mc
+    depends_on:
+      - s3
+    container_name: s3_init
+    entrypoint: >
+      /bin/sh -c "
+      sleep 10;
+      /usr/bin/mc config host add myminio http://s3:9000 minioadmin minioadmin;
+      /usr/bin/mc mb --ignore-existing myminio/internxt;
+      /usr/bin/mc mb --ignore-existing myminio/avatars;
+      /usr/bin/mc policy attach public myminio/internxt;
+      /usr/bin/mc admin user add myminio internxt internxt;
+      /usr/bin/mc admin policy attach myminio readwrite --user internxt;
+      exit 0;
+      "
+    networks:
+      - internxt
+
+  drive-server:
+    build:
+      context: ../
+      dockerfile: infrastructure/development.Dockerfile
+    container_name: drive-server
+    ports:
+      - 8000:8000
+    depends_on:
+      - bridge
+      - postgres
+      - redis
+    volumes:
+      - ../src:/usr/app/src
+    networks:
+      - internxt
+
+  notifications:
+    build:
+      context: ../../notifications
+      dockerfile: infrastructure/development.Dockerfile
+    container_name: notifications
+    networks:
+      - internxt
+    depends_on:
+      - drive-server
+    ports:
+      - 4000:4000
+    volumes:
+      - ../../notifications/src:/usr/app/src
+
+  postgres:
+    image: postgres:14
+    container_name: postgres
+    restart: always
+    volumes:
+      - ./database-init-scripts:/docker-entrypoint-initdb.d
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: example
+      POSTGRES_DB: xCloud
+    networks:
+      - internxt
+    ports:
+      - 5432:5432
+
+  redis:
+    image: redis:latest
+    container_name: drive-server-redis
+    restart: always
+    networks:
+      - internxt
+
+  drive-server-wip:
+    container_name: drive-server-wip
+    build: 
+      context: ../../drive-server-wip
+      dockerfile: development.Dockerfile
+    volumes:
+      - ../../drive-server-wip:/usr/app
+      - ../../drive-server-wip/.env.development:/usr/app/.env.development
+      - /usr/app/node_modules
+    ports:
+      - 3004:3004
+    networks:
+      - internxt
+    environment: 
+      NODE_ENV: development
+    env_file:
+      - ../../drive-server-wip/.env.development
+
+networks:
+  internxt:
+    name: internxt
